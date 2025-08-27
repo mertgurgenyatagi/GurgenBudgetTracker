@@ -1,7 +1,11 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
-*.py[codz]
+*.py[cod]
 *$py.class
+
+# User data files (application-specific)
+user_data/
+backup_log.json
 
 # C extensions
 *.so
