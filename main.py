@@ -102,7 +102,7 @@ class BudgetTrackerApp(ThemedTk):
         self.set_theme("clam")
 
         self.title("Gurgen Budget Tracker")
-        self.geometry("800x600")
+        self.geometry("700x500")
 
         # Main container
         main_container = ttk.Frame(self)
@@ -146,6 +146,9 @@ class BudgetTrackerApp(ThemedTk):
         
         # Perform automatic backup on startup (once per hour)
         self.perform_startup_backup()
+        
+        # Record daily balance if first run of the day
+        self.record_daily_balance()
 
     def perform_startup_backup(self):
         """Perform backup if it's been more than an hour since last backup"""
@@ -156,6 +159,82 @@ class BudgetTrackerApp(ThemedTk):
                 print("Backup skipped (too recent)")
         except Exception as e:
             print(f"Backup error: {e}")
+    
+    def record_daily_balance(self):
+        """Record current balance as yesterday's balance if first run of the day"""
+        from datetime import datetime, timedelta
+        
+        today = datetime.now()
+        yesterday = today - timedelta(days=1)
+        yesterday_str = yesterday.strftime("%d/%m/%Y")
+        
+        # Check if we already have a balance recorded for yesterday
+        balance_file_path = get_data_file_path("balance_database.csv")
+        
+        try:
+            # Read existing balance records
+            existing_dates = set()
+            with open(balance_file_path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                for row in reader:
+                    if len(row) >= 2:
+                        existing_dates.add(row[1])
+            
+            # If yesterday's balance is not recorded, record current balance as yesterday's
+            if yesterday_str not in existing_dates:
+                # Calculate current balance
+                total_expenses, total_income = self.calculate_current_balance()
+                current_balance = total_income - total_expenses
+                
+                # Append yesterday's balance to the file
+                with open(balance_file_path, 'a', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([f"{current_balance:.1f}", yesterday_str])
+                
+                print(f"Daily balance recorded: ₺{current_balance:.1f} for {yesterday_str}")
+            
+        except FileNotFoundError:
+            # Create the file if it doesn't exist
+            with open(balance_file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Balance", "Date"])  # Header
+                
+                # Calculate current balance and record as yesterday's
+                total_expenses, total_income = self.calculate_current_balance()
+                current_balance = total_income - total_expenses
+                writer.writerow([f"{current_balance:.1f}", yesterday_str])
+                
+                print(f"Balance database created with initial balance: ₺{current_balance:.1f} for {yesterday_str}")
+        except Exception as e:
+            print(f"Error recording daily balance: {e}")
+    
+    def calculate_current_balance(self):
+        """Calculate current total expenses and income"""
+        total_expenses = 0.0
+        total_income = 0.0
+        
+        try:
+            with open(get_data_file_path("transactions_database.csv"), 'r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                
+                for row in reader:
+                    if row and len(row) >= 5:
+                        try:
+                            flow_type = row[0]
+                            amount = float(row[2])
+                            
+                            if flow_type == "Expense":
+                                total_expenses += amount
+                            elif flow_type == "Income":
+                                total_income += amount
+                        except (ValueError, IndexError):
+                            continue  # Skip invalid transactions
+        except FileNotFoundError:
+            pass  # No transactions file yet
+        
+        return total_expenses, total_income
 
     def show_page(self, page_name):
         page = self.pages[page_name]
@@ -888,7 +967,7 @@ class LabelsAndTypes(Page):
             # Load available types
             available_types = []
             try:
-                with open(types_filename, 'r', newline='', encoding='utf-8') as f:
+                with open(get_data_file_path(types_filename), 'r', newline='', encoding='utf-8') as f:
                     reader = csv.reader(f)
                     for row in reader:
                         if row and len(row) >= 1:
@@ -1085,14 +1164,14 @@ class Analytics(Page):
         title_label = ttk.Label(self.scrollable_frame, text="Analytics", font=("Arial", 24))
         title_label.pack(pady=20)
         
-        # Time period selection (applies to whole page)
-        self.create_time_period_selection()
-        
-        # General Flow section
+        # General Flow section (includes its own time period selection)
         self.create_general_flow_section()
         
         # Labels & Types section
         self.create_labels_types_section()
+        
+        # Trend Analysis section (page-wide line chart)
+        self.create_trend_analysis_section()
     
     def _on_canvas_configure(self, event):
         """Handle canvas resize to update the scrollable frame width"""
@@ -1104,33 +1183,32 @@ class Analytics(Page):
         """Handle mouse wheel scrolling"""
         self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
     
-    def create_time_period_selection(self):
-        """Create the time period selection that applies to the whole page"""
-        period_frame = ttk.Frame(self.scrollable_frame)
-        period_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        ttk.Label(period_frame, text="Time Period:", font=("Arial", 14, "bold")).pack(side=tk.LEFT, padx=(0, 10))
-        
-        self.period_var = tk.StringVar(value="All Time")
-        period_options = ["Today", "Last 7 days", "Last 30 days", "Last 12 months", "All Time"]
-        period_dropdown = ttk.Combobox(period_frame, textvariable=self.period_var, values=period_options, 
-                                     state="readonly", width=15, font=("Arial", 12))
-        period_dropdown.pack(side=tk.LEFT)
-        period_dropdown.bind("<<ComboboxSelected>>", self.update_all_analytics)
-        
-        # Separator
-        separator = ttk.Separator(self.scrollable_frame, orient='horizontal')
-        separator.pack(fill=tk.X, padx=20, pady=10)
-    
     def create_general_flow_section(self):
         """Create the General Flow analytics section"""
         # Section frame
         flow_frame = ttk.LabelFrame(self.scrollable_frame, text="General Flow")
         flow_frame.pack(fill=tk.X, padx=20, pady=10)
         
+        # Time Period Control Frame (inside General Flow section)
+        period_control_frame = ttk.Frame(flow_frame)
+        period_control_frame.pack(fill=tk.X, padx=10, pady=(10, 15))
+        
+        ttk.Label(period_control_frame, text="Time Period:", font=("Arial", 12, "bold")).pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.period_var = tk.StringVar(value="All Time")
+        period_options = ["Today", "Last 7 days", "Last 30 days", "Last 12 months", "All Time"]
+        period_dropdown = ttk.Combobox(period_control_frame, textvariable=self.period_var, values=period_options, 
+                                     state="readonly", width=15, font=("Arial", 11))
+        period_dropdown.pack(side=tk.LEFT)
+        period_dropdown.bind("<<ComboboxSelected>>", self.update_all_analytics)
+        
+        # Separator line within the section
+        separator = ttk.Separator(flow_frame, orient='horizontal')
+        separator.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
         # Main analytics frame with two columns
         analytics_frame = ttk.Frame(flow_frame)
-        analytics_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        analytics_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
         
         # Left column - Totals
         left_frame = ttk.Frame(analytics_frame)
@@ -1196,29 +1274,529 @@ class Analytics(Page):
         self.update_general_flow()
     
     def create_labels_types_section(self):
-        """Create the Labels & Types analytics section"""
+        """Create the Labels & Types analytics section with dropdown controls"""
         # Section frame
         labels_types_frame = ttk.LabelFrame(self.scrollable_frame, text="Labels & Types")
         labels_types_frame.pack(fill=tk.X, padx=20, pady=10)
         
-        # Main content frame
-        content_frame = ttk.Frame(labels_types_frame)
-        content_frame.pack(fill=tk.X, padx=10, pady=10)
+        # Control panel frame
+        control_frame = ttk.Frame(labels_types_frame)
+        control_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
         
-        # Most Common Expenses By Label
-        self.create_tabbed_subsection(content_frame, "Most Common Expenses By Label", "expense_label")
+        # First row of controls
+        row1_frame = ttk.Frame(control_frame)
+        row1_frame.pack(fill=tk.X, pady=(0, 5))
         
-        # Most Common Expenses By Type
-        self.create_tabbed_subsection(content_frame, "Most Common Expenses By Type", "expense_type")
+        # Flow Type dropdown (Expenses/Incomes)
+        ttk.Label(row1_frame, text="Flow:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 3))
+        self.lt_flow_var = tk.StringVar(value="Expenses")
+        flow_combo = ttk.Combobox(row1_frame, textvariable=self.lt_flow_var, 
+                                 values=["Expenses", "Incomes"], state="readonly", width=8, font=("Arial", 9))
+        flow_combo.pack(side=tk.LEFT, padx=(0, 10))
         
-        # Most Common Incomes By Label
-        self.create_tabbed_subsection(content_frame, "Most Common Incomes By Label", "income_label")
+        # Time Period dropdown (specific to this section)
+        ttk.Label(row1_frame, text="Period:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 3))
+        self.lt_period_var = tk.StringVar(value="Last 7 days")
+        period_combo = ttk.Combobox(row1_frame, textvariable=self.lt_period_var,
+                                   values=["Today", "Last 7 days", "Last 30 days", "Last 12 months", "All time"],
+                                   state="readonly", width=12, font=("Arial", 9))
+        period_combo.pack(side=tk.LEFT)
         
-        # Most Common Incomes By Type
-        self.create_tabbed_subsection(content_frame, "Most Common Incomes By Type", "income_type")
+        # Second row of controls
+        row2_frame = ttk.Frame(control_frame)
+        row2_frame.pack(fill=tk.X)
         
-        # Load initial data for this section
-        self.update_labels_types()
+        # Category dropdown (By label/By type)
+        ttk.Label(row2_frame, text="Category:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 3))
+        self.lt_category_var = tk.StringVar(value="By label")
+        category_combo = ttk.Combobox(row2_frame, textvariable=self.lt_category_var,
+                                     values=["By label", "By type"], state="readonly", width=8, font=("Arial", 9))
+        category_combo.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # View Type dropdown (Numerical/Graphs)
+        ttk.Label(row2_frame, text="View:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 3))
+        self.lt_view_var = tk.StringVar(value="Numerical")
+        view_combo = ttk.Combobox(row2_frame, textvariable=self.lt_view_var,
+                                 values=["Numerical", "Graphs"], state="readonly", width=8, font=("Arial", 9))
+        view_combo.pack(side=tk.LEFT)
+        
+        # Bind events to update when dropdowns change
+        flow_combo.bind('<<ComboboxSelected>>', self.update_labels_types_display)
+        period_combo.bind('<<ComboboxSelected>>', self.update_labels_types_display)
+        category_combo.bind('<<ComboboxSelected>>', self.update_labels_types_display)
+        view_combo.bind('<<ComboboxSelected>>', self.update_labels_types_display)
+        
+        # Content area frame
+        self.lt_content_frame = ttk.Frame(labels_types_frame)
+        self.lt_content_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Create numerical and graphs content areas
+        self.create_labels_types_content()
+        
+        # Load initial data
+        self.update_labels_types_display()
+    
+    def create_labels_types_content(self):
+        """Create the content area for labels & types display"""
+        # Content frame with dynamic height
+        self.lt_display_frame = ttk.Frame(self.lt_content_frame)
+        self.lt_display_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # Numerical content frame
+        self.lt_numerical_frame = ttk.Frame(self.lt_display_frame)
+        self.lt_numerical_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Graphs content frame (hidden by default)
+        self.lt_graphs_frame = ttk.Frame(self.lt_display_frame)
+        
+        # Create 5 rows for numerical data
+        self.lt_data_rows = []
+        for i in range(5):
+            row_frame = ttk.Frame(self.lt_numerical_frame)
+            row_frame.pack(fill=tk.X, pady=1)
+            
+            label_text = ttk.Label(row_frame, text="", font=("Arial", 12))
+            label_text.pack(side=tk.LEFT)
+            
+            stats_text = ttk.Label(row_frame, text="", font=("Arial", 12))
+            stats_text.pack(side=tk.RIGHT)
+            
+            self.lt_data_rows.append((label_text, stats_text))
+        
+        # Create chart frame for graphs view
+        self.create_labels_types_charts()
+    
+    def create_labels_types_charts(self):
+        """Create chart frame for the unified labels & types section"""
+        # Main chart container
+        chart_container = ttk.Frame(self.lt_graphs_frame)
+        chart_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Configure grid weights for equal distribution
+        chart_container.grid_columnconfigure(0, weight=1)
+        chart_container.grid_columnconfigure(1, weight=1)
+        chart_container.grid_rowconfigure(0, weight=1)
+        
+        # Left frame for bar chart
+        self.lt_bar_chart_frame = ttk.LabelFrame(chart_container, text="Bar Chart")
+        self.lt_bar_chart_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 2), pady=0)
+        
+        # Right frame for pie chart
+        self.lt_pie_chart_frame = ttk.LabelFrame(chart_container, text="Pie Chart")
+        self.lt_pie_chart_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 0), pady=0)
+    
+    def update_labels_types_display(self, event=None):
+        """Update the labels & types display based on dropdown selections"""
+        # Get current selections
+        flow_type = self.lt_flow_var.get()
+        period = self.lt_period_var.get() 
+        category = self.lt_category_var.get()
+        view_type = self.lt_view_var.get()
+        
+        # Handle frame height and visibility based on view type
+        if view_type == "Numerical":
+            # Show numerical, hide graphs
+            self.lt_numerical_frame.pack(fill=tk.BOTH, expand=True)
+            self.lt_graphs_frame.pack_forget()
+            
+            # Make frame adaptable (remove fixed height)
+            self.lt_display_frame.config(height=1)
+            self.lt_display_frame.pack_propagate(True)
+        else:
+            # Show graphs, hide numerical
+            self.lt_graphs_frame.pack(fill=tk.BOTH, expand=True)
+            self.lt_numerical_frame.pack_forget()
+            
+            # Set smaller fixed height for graphs to fit compact window
+            self.lt_display_frame.config(height=200)
+            self.lt_display_frame.pack_propagate(False)
+            
+            # Update charts
+            self.update_labels_types_charts()
+            return
+        
+        # Get filtered transactions for the selected period
+        transactions = self.get_filtered_transactions_for_period(period)
+        days_in_period = self.get_days_in_period_for_selection(period, transactions)
+        
+        # Calculate statistics based on selections
+        if category == "By label":
+            stats = self.calculate_label_stats(transactions, flow_type)
+        else:
+            stats = self.calculate_type_stats(transactions, flow_type)
+        
+        # Update display color based on flow type
+        color = "darkred" if flow_type == "Expenses" else "darkgreen"
+        
+        # Update the numerical display
+        self.display_stats_in_lt_rows(stats, days_in_period, color)
+    
+    def get_filtered_transactions_for_period(self, period):
+        """Get transactions filtered by the selected time period for Labels & Types section"""
+        try:
+            with open(get_data_file_path("transactions_database.csv"), 'r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                all_transactions = [row for row in reader if row and len(row) >= 5]
+        except FileNotFoundError:
+            return []
+        
+        if period == "All time":
+            return all_transactions
+        
+        from datetime import datetime, timedelta
+        
+        # Calculate the cutoff date
+        today = datetime.now()
+        if period == "Today":
+            cutoff_date = today.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == "Last 7 days":
+            cutoff_date = today - timedelta(days=7)
+        elif period == "Last 30 days":
+            cutoff_date = today - timedelta(days=30)
+        elif period == "Last 12 months":
+            cutoff_date = today - timedelta(days=365)
+        else:
+            return all_transactions
+        
+        # Filter transactions
+        filtered_transactions = []
+        for transaction in all_transactions:
+            try:
+                transaction_date = datetime.strptime(transaction[4], "%d/%m/%Y")
+                if transaction_date >= cutoff_date:
+                    filtered_transactions.append(transaction)
+            except (ValueError, IndexError):
+                continue
+        
+        return filtered_transactions
+    
+    def get_days_in_period_for_selection(self, period, transactions):
+        """Calculate days in period for Labels & Types section"""
+        if period == "Today":
+            return 1
+        elif period == "Last 7 days":
+            return min(7, len(set(t[4] for t in transactions if len(t) >= 5)) or 1)
+        elif period == "Last 30 days":
+            return min(30, len(set(t[4] for t in transactions if len(t) >= 5)) or 1)
+        elif period == "Last 12 months":
+            return min(365, len(set(t[4] for t in transactions if len(t) >= 5)) or 1)
+        else:  # All time
+            unique_dates = set(t[4] for t in transactions if len(t) >= 5)
+            return len(unique_dates) if unique_dates else 1
+    
+    def display_stats_in_lt_rows(self, stats, days_in_period, color):
+        """Display statistics in the Labels & Types rows"""
+        # Clear all rows first
+        for label_widget, stats_widget in self.lt_data_rows:
+            label_widget.config(text="", foreground="black")
+            stats_widget.config(text="", foreground="black")
+        
+        # Fill rows with data
+        for i, (name, total, percentage) in enumerate(stats[:5]):  # Limit to 5 items
+            if i < len(self.lt_data_rows):
+                daily_avg = total / days_in_period if days_in_period > 0 else 0
+                
+                # Set label name
+                self.lt_data_rows[i][0].config(text=f"{i+1}. {name}", foreground=color)
+                
+                # Set statistics (percentage, total, daily average)
+                stats_text = f"{percentage:.1f}% | ₺{total:.2f} | ₺{daily_avg:.2f}/day"
+                self.lt_data_rows[i][1].config(text=stats_text, foreground=color)
+    
+    def update_labels_types_charts(self):
+        """Update charts for Labels & Types section"""
+        # Get current data
+        data = self.get_lt_section_data()
+        
+        # Clear previous charts
+        for widget in self.lt_bar_chart_frame.winfo_children():
+            widget.destroy()
+        for widget in self.lt_pie_chart_frame.winfo_children():
+            widget.destroy()
+        
+        if not data:
+            # Show no data message in both frames
+            no_data_bar = ttk.Label(self.lt_bar_chart_frame, text="No data available", 
+                                  font=("Arial", 10, "italic"), foreground="gray")
+            no_data_bar.pack(expand=True)
+            
+            no_data_pie = ttk.Label(self.lt_pie_chart_frame, text="No data available", 
+                                  font=("Arial", 10, "italic"), foreground="gray")
+            no_data_pie.pack(expand=True)
+            return
+        
+        # Get colors for items
+        colors = self.get_chart_colors(len(data))
+        
+        # Create bar chart - smaller size for compact window
+        bar_fig = Figure(figsize=(3, 2), dpi=80)
+        bar_ax = bar_fig.add_subplot(111)
+        bar_canvas = FigureCanvasTkAgg(bar_fig, self.lt_bar_chart_frame)
+        self.create_interactive_bar_chart(bar_ax, bar_canvas, data, colors)
+        
+        bar_canvas.draw()
+        bar_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        # Create pie chart - smaller size for compact window
+        pie_fig = Figure(figsize=(3, 2), dpi=80)
+        pie_ax = pie_fig.add_subplot(111)
+        pie_canvas = FigureCanvasTkAgg(pie_fig, self.lt_pie_chart_frame)
+        self.create_interactive_pie_chart(pie_ax, pie_canvas, data, colors)
+        
+        pie_canvas.draw()
+        pie_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    
+    def get_lt_section_data(self):
+        """Get data for the Labels & Types section to create charts"""
+        data = []
+        
+        for label_widget, stats_widget in self.lt_data_rows:
+            label_text = label_widget.cget("text")
+            stats_text = stats_widget.cget("text")
+            
+            if label_text and stats_text:
+                # Extract percentage and amount from stats text (format: "X.X% | ₺Y.YY | ₺Z.ZZ/day")
+                try:
+                    # Remove the number prefix from label (e.g., "1. Food" -> "Food")
+                    clean_label = label_text.split('. ', 1)[1] if '. ' in label_text else label_text
+                    
+                    # Extract total amount
+                    amount_part = stats_text.split('₺')[1].split(' |')[0]
+                    amount = float(amount_part)
+                    
+                    data.append((clean_label, amount))
+                except (ValueError, IndexError):
+                    continue
+        
+        return data
+    
+    def create_trend_analysis_section(self):
+        """Create the Trend Analysis section with page-wide line chart"""
+        # Section frame
+        trend_frame = ttk.LabelFrame(self.scrollable_frame, text="Trend Analysis")
+        trend_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        # Control panel frame
+        trend_control_frame = ttk.Frame(trend_frame)
+        trend_control_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        
+        # Flow Type dropdown (Expenses/Incomes/Balance)
+        ttk.Label(trend_control_frame, text="Flow:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 3))
+        self.trend_flow_var = tk.StringVar(value="Expenses")
+        trend_flow_combo = ttk.Combobox(trend_control_frame, textvariable=self.trend_flow_var, 
+                                       values=["Expenses", "Incomes", "Balance"], state="readonly", width=8, font=("Arial", 9))
+        trend_flow_combo.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Time Period dropdown
+        ttk.Label(trend_control_frame, text="Period:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 3))
+        self.trend_period_var = tk.StringVar(value="Last 7 days")
+        trend_period_combo = ttk.Combobox(trend_control_frame, textvariable=self.trend_period_var,
+                                         values=["Last 7 days", "Last 30 days", "Last 12 months"],
+                                         state="readonly", width=12, font=("Arial", 9))
+        trend_period_combo.pack(side=tk.LEFT)
+        
+        # Bind events to update when dropdowns change
+        trend_flow_combo.bind('<<ComboboxSelected>>', self.update_trend_analysis)
+        trend_period_combo.bind('<<ComboboxSelected>>', self.update_trend_analysis)
+        
+        # Chart container frame
+        self.trend_chart_frame = ttk.Frame(trend_frame)
+        self.trend_chart_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Set fixed height for the trend chart
+        self.trend_chart_frame.config(height=180)
+        self.trend_chart_frame.pack_propagate(False)
+        
+        # Load initial data
+        self.update_trend_analysis()
+    
+    def update_trend_analysis(self, event=None):
+        """Update the trend analysis chart based on dropdown selections"""
+        # Get current selections
+        flow_type = self.trend_flow_var.get()
+        period = self.trend_period_var.get()
+        
+        # Clear previous chart
+        for widget in self.trend_chart_frame.winfo_children():
+            widget.destroy()
+        
+        # Get trend data
+        trend_data = self.get_trend_data(flow_type, period)
+        
+        if not trend_data:
+            # Show no data message
+            no_data_label = ttk.Label(self.trend_chart_frame, text="No data available for the selected period", 
+                                    font=("Arial", 12, "italic"), foreground="gray")
+            no_data_label.pack(expand=True)
+            return
+        
+        # Create line chart with gradient fill
+        self.create_trend_line_chart(trend_data, flow_type)
+    
+    def get_trend_data(self, flow_type, period):
+        """Get daily trend data for the specified flow type and period"""
+        from datetime import datetime, timedelta
+        import collections
+        
+        # Calculate the period range
+        today = datetime.now()
+        if period == "Last 7 days":
+            cutoff_date = today - timedelta(days=7)
+            days_range = 7
+        elif period == "Last 30 days":
+            cutoff_date = today - timedelta(days=30)
+            days_range = 30
+        elif period == "Last 12 months":
+            cutoff_date = today - timedelta(days=365)
+            days_range = 365
+        else:
+            return []
+        
+        # Handle Balance data differently from Expenses/Incomes
+        if flow_type == "Balance":
+            return self.get_balance_trend_data(cutoff_date, days_range, today)
+        
+        # Handle Expenses/Incomes from transactions
+        try:
+            with open(get_data_file_path("transactions_database.csv"), 'r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                all_transactions = [row for row in reader if row and len(row) >= 5]
+        except FileNotFoundError:
+            return []
+        
+        # Filter transactions by flow type and period
+        flow_filter = "Expense" if flow_type == "Expenses" else "Income"
+        filtered_transactions = []
+        
+        for transaction in all_transactions:
+            if len(transaction) >= 5 and transaction[0] == flow_filter:
+                try:
+                    transaction_date = datetime.strptime(transaction[4], "%d/%m/%Y")
+                    if transaction_date >= cutoff_date:
+                        filtered_transactions.append((transaction_date, float(transaction[2])))
+                except (ValueError, IndexError):
+                    continue
+        
+        # Group by date and sum amounts
+        daily_totals = collections.defaultdict(float)
+        for date, amount in filtered_transactions:
+            date_key = date.strftime("%Y-%m-%d")
+            daily_totals[date_key] += amount
+        
+        # Create complete date range with zeros for missing dates
+        date_range = []
+        amounts = []
+        
+        for i in range(days_range):
+            date = today - timedelta(days=days_range - 1 - i)
+            date_key = date.strftime("%Y-%m-%d")
+            date_range.append(date.strftime("%d/%m"))
+            amounts.append(daily_totals.get(date_key, 0))
+        
+        return list(zip(date_range, amounts))
+    
+    def get_balance_trend_data(self, cutoff_date, days_range, today):
+        """Get balance trend data from balance_database.csv"""
+        from datetime import datetime, timedelta
+        import collections
+        
+        try:
+            with open(get_data_file_path("balance_database.csv"), 'r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                balance_records = []
+                
+                for row in reader:
+                    if len(row) >= 2:
+                        try:
+                            balance = float(row[0])
+                            date_str = row[1]
+                            date = datetime.strptime(date_str, "%d/%m/%Y")
+                            
+                            if date >= cutoff_date:
+                                balance_records.append((date, balance))
+                        except (ValueError, IndexError):
+                            continue
+        except FileNotFoundError:
+            return []
+        
+        # Create a dictionary of balance by date
+        balance_by_date = {}
+        for date, balance in balance_records:
+            date_key = date.strftime("%Y-%m-%d")
+            balance_by_date[date_key] = balance
+        
+        # Create complete date range
+        date_range = []
+        amounts = []
+        last_known_balance = None
+        
+        for i in range(days_range):
+            date = today - timedelta(days=days_range - 1 - i)
+            date_key = date.strftime("%Y-%m-%d")
+            date_range.append(date.strftime("%d/%m"))
+            
+            # Use recorded balance if available, otherwise use last known balance
+            if date_key in balance_by_date:
+                last_known_balance = balance_by_date[date_key]
+                amounts.append(last_known_balance)
+            elif last_known_balance is not None:
+                amounts.append(last_known_balance)
+            else:
+                amounts.append(0)
+        
+        return list(zip(date_range, amounts))
+    
+    def create_trend_line_chart(self, trend_data, flow_type):
+        """Create a line chart with gradient fill for trend analysis"""
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        import numpy as np
+        
+        # Create figure for the line chart
+        fig = Figure(figsize=(8, 2.2), dpi=80, facecolor='white')
+        ax = fig.add_subplot(111)
+        
+        # Extract dates and amounts
+        dates, amounts = zip(*trend_data) if trend_data else ([], [])
+        
+        # Create line chart
+        if flow_type == "Expenses":
+            color = "#dc3545"  # Red for expenses
+        elif flow_type == "Incomes":
+            color = "#28a745"  # Green for income
+        else:  # Balance
+            color = "#007bff"  # Blue for balance
+        
+        if dates and amounts:
+            x = np.arange(len(dates))
+            line = ax.plot(x, amounts, color=color, linewidth=2, marker='o', markersize=3)[0]
+            
+            # Add gradient fill under the line
+            ax.fill_between(x, amounts, alpha=0.3, color=color)
+            
+            # Customize the chart
+            ax.set_xticks(x[::max(1, len(x)//10)])  # Show every nth label to avoid crowding
+            ax.set_xticklabels([dates[i] for i in x[::max(1, len(x)//10)]], rotation=45, fontsize=8)
+            ax.set_ylabel(f"{flow_type} (₺)", fontsize=9)
+            ax.grid(True, alpha=0.3)
+            
+            # Remove top and right spines
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            
+            # Set y-axis to start from 0
+            ax.set_ylim(bottom=0)
+        
+        # Adjust layout to prevent label cutoff
+        fig.tight_layout()
+        
+        # Create canvas and add to frame
+        canvas = FigureCanvasTkAgg(fig, self.trend_chart_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
     
     def create_tabbed_subsection(self, parent, title, section_id):
         """Create a tabbed subsection with Numerical and Graphs tabs"""
@@ -1624,80 +2202,97 @@ class Analytics(Page):
         self.avg_balance_label.config(foreground=avg_balance_color)
     
     def update_labels_types(self):
-        """Update labels & types analytics"""
-        period = self.period_var.get()
-        transactions = self.get_filtered_transactions(period)
-        days_in_period = self.get_days_in_period(period, transactions)
-        
-        # Calculate statistics for each category
-        expense_label_stats = self.calculate_label_stats(transactions, "Expense")
-        expense_type_stats = self.calculate_type_stats(transactions, "Expense")
-        income_label_stats = self.calculate_label_stats(transactions, "Income")
-        income_type_stats = self.calculate_type_stats(transactions, "Income")
-        
-        # Update display for each section
-        self.display_stats_in_rows(self.expense_label_rows, expense_label_stats, days_in_period, "darkred")
-        self.display_stats_in_rows(self.expense_type_rows, expense_type_stats, days_in_period, "darkred")
-        self.display_stats_in_rows(self.income_label_rows, income_label_stats, days_in_period, "darkgreen")
-        self.display_stats_in_rows(self.income_type_rows, income_type_stats, days_in_period, "darkgreen")
-        
-        # Update charts for all sections
-        self.update_section_charts("expense_label")
-        self.update_section_charts("expense_type")
-        self.update_section_charts("income_label")
-        self.update_section_charts("income_type")
+        """Update labels & types analytics - now handled by new dropdown interface"""
+        # This method is now handled by update_labels_types_display
+        self.update_labels_types_display()
     
     def calculate_label_stats(self, transactions, flow_type):
-        """Calculate statistics for labels"""
+        """Calculate statistics by label for the given flow type"""
+        # Filter transactions by flow type (flow_type is "Expenses" or "Incomes", CSV has "Expense" or "Income")
+        flow_filter = "Expense" if flow_type == "Expenses" else "Income"
+        filtered_transactions = [t for t in transactions if len(t) >= 5 and t[0] == flow_filter]
+        
+        # Get label statistics
         label_totals = {}
-        total_amount = 0
+        for transaction in filtered_transactions:
+            try:
+                amount = float(transaction[2])
+                label = transaction[1] if len(transaction) > 1 else "Unknown"
+                label_totals[label] = label_totals.get(label, 0) + amount
+            except (ValueError, IndexError):
+                continue
         
-        for transaction in transactions:
-            if len(transaction) >= 5 and transaction[0] == flow_type:
-                try:
-                    label = transaction[1]
-                    amount = float(transaction[2])
-                    label_totals[label] = label_totals.get(label, 0) + amount
-                    total_amount += amount
-                except (ValueError, IndexError):
-                    continue
+        # Calculate total for percentages
+        total_amount = sum(label_totals.values())
         
-        # Sort by amount and get top 5
-        sorted_labels = sorted(label_totals.items(), key=lambda x: x[1], reverse=True)[:5]
-        
-        # Calculate percentages
+        # Convert to list with percentages and sort by amount
         stats = []
-        for label, amount in sorted_labels:
+        for label, amount in label_totals.items():
             percentage = (amount / total_amount * 100) if total_amount > 0 else 0
             stats.append((label, amount, percentage))
+        
+        # Sort by amount (descending)
+        stats.sort(key=lambda x: x[1], reverse=True)
         
         return stats
     
     def calculate_type_stats(self, transactions, flow_type):
-        """Calculate statistics for types"""
+        """Calculate statistics by type for the given flow type"""
+        # Filter transactions by flow type (flow_type is "Expenses" or "Incomes", CSV has "Expense" or "Income")
+        flow_filter = "Expense" if flow_type == "Expenses" else "Income"
+        filtered_transactions = [t for t in transactions if len(t) >= 5 and t[0] == flow_filter]
+        
+        # Calculate type totals
         type_totals = {}
-        total_amount = 0
+        for transaction in filtered_transactions:
+            try:
+                amount = float(transaction[2])
+                type_name = transaction[3] if len(transaction) > 3 else "Unknown"
+                type_totals[type_name] = type_totals.get(type_name, 0) + amount
+            except (ValueError, IndexError):
+                continue
         
-        for transaction in transactions:
-            if len(transaction) >= 5 and transaction[0] == flow_type:
-                try:
-                    type_name = transaction[3]
-                    amount = float(transaction[2])
-                    type_totals[type_name] = type_totals.get(type_name, 0) + amount
-                    total_amount += amount
-                except (ValueError, IndexError):
-                    continue
+        # Calculate total for percentages
+        total_amount = sum(type_totals.values())
         
-        # Sort by amount and get top 5
-        sorted_types = sorted(type_totals.items(), key=lambda x: x[1], reverse=True)[:5]
-        
-        # Calculate percentages
+        # Convert to list with percentages and sort by amount
         stats = []
-        for type_name, amount in sorted_types:
+        for type_name, amount in type_totals.items():
             percentage = (amount / total_amount * 100) if total_amount > 0 else 0
             stats.append((type_name, amount, percentage))
         
+        # Sort by amount (descending)
+        stats.sort(key=lambda x: x[1], reverse=True)
+        
         return stats
+    
+    def get_label_type_mapping(self, flow_type):
+        """Get mapping from labels to types based on CSV files"""
+        mapping = {}
+        
+        try:
+            if flow_type == "Expenses":
+                # Read expense_labels.csv
+                with open(get_data_file_path("expense_labels.csv"), 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    for row in reader:
+                        if len(row) >= 2:
+                            label = row[0]
+                            type_name = row[1]
+                            mapping[label] = type_name
+            else:
+                # Read income_labels.csv
+                with open(get_data_file_path("income_labels.csv"), 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    for row in reader:
+                        if len(row) >= 2:
+                            label = row[0]
+                            type_name = row[1]
+                            mapping[label] = type_name
+        except FileNotFoundError:
+            pass  # Return empty mapping if file doesn't exist
+        
+        return mapping
     
     def display_stats_in_rows(self, rows, stats, days_in_period, color):
         """Display statistics in the allocated rows"""
